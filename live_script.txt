@@ -1,0 +1,679 @@
+import sys
+import os
+import random
+import threading
+import tempfile
+import time
+from collections import deque
+
+try:
+    Image
+    ImageDraw
+except Exception:
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        Image = None
+        ImageDraw = None
+
+def make_odd(n):
+    n = int(n)
+    return n if n % 2 == 1 else n + 1
+
+def dfs_generator(W, H, seed=None):
+    if seed is not None:
+        random.seed(seed)
+    maze = [['#' for _ in range(W)] for _ in range(H)]
+    visited = [[False]*W for _ in range(H)]
+    start = (1, 1)
+    stack = [start]
+    visited[start[1]][start[0]] = True
+    maze[start[1]][start[0]] = ' '
+    yield ('carve', start[0], start[1], maze)
+    while stack:
+        x, y = stack[-1]
+        neighbors = []
+        for dx, dy in ((2,0),(-2,0),(0,2),(0,-2)):
+            nx, ny = x + dx, y + dy
+            if 0 < nx < W-1 and 0 < ny < H-1 and not visited[ny][nx]:
+                neighbors.append((nx, ny, dx//2, dy//2))
+        if neighbors:
+            nx, ny, wx, wy = random.choice(neighbors)
+            maze[y+wy][x+wx] = ' '
+            maze[ny][nx] = ' '
+            visited[ny][nx] = True
+            stack.append((nx, ny))
+            yield ('carve', x+wx, y+wy, maze)
+            yield ('carve', nx, ny, maze)
+        else:
+            stack.pop()
+    yield ('done', maze)
+
+def bfs_solve(maze, start, end):
+    H = len(maze)
+    W = len(maze[0])
+    q = deque([start])
+    prev = {start: None}
+    while q:
+        x,y = q.popleft()
+        if (x,y) == end:
+            break
+        for dx,dy in ((1,0),(-1,0),(0,1),(0,-1)):
+            nx,ny = x+dx, y+dy
+            if 0 <= nx < W and 0 <= ny < H and maze[ny][nx] == ' ' and (nx,ny) not in prev:
+                prev[(nx,ny)] = (x,y)
+                q.append((nx,ny))
+    if end not in prev:
+        return []
+    path = []
+    cur = end
+    while cur:
+        path.append(cur)
+        cur = prev[cur]
+    path.reverse()
+    return path
+
+try:
+    _CallEvent
+except Exception:
+    class _CallEvent(QEvent):
+        EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
+        def __init__(self, callable_):
+            super().__init__(self.EVENT_TYPE)
+            self.callable = callable_
+
+class MazeWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.locale = 'pl'
+        self.translations = {
+            "pl": {
+                "window_title": "Generator Labiryntów - PyQt6 (live)",
+                "checkbox_default": "Domyślne",
+                "checkbox_instant": "Generuj natychmiast",
+                "btn_generate": "Generuj",
+                "btn_save": "Zapisz PNG",
+                "btn_save_solution": "Zapisz z rozwiązaniem",
+                "width_label": "Szerokość (W):",
+                "height_label": "Wysokość (H):",
+                "seed_label": "Seed:",
+                "seed_placeholder": "opcjonalny (liczba)",
+                "variant_label": "Wejście/wyjście:",
+                "scale_label": "Skala (px na komórkę):",
+                "msg_generation_failed": "Generacja nie powiodła się.",
+                "msg_pillow_missing": "Pillow (PIL) nie jest dostępny — nie można zapisać PNG.",
+                "msg_animation_error_title": "Błąd animacji",
+                "msg_init_error_title": "Błąd inicjalizacji",
+                "file_save_png": "Zapisz PNG",
+                "file_save_solution": "Zapisz z rozwiązaniem",
+                "variants": ["góra–dół", "rogi", "przeciwne rogi", "lewo–prawo", "dół→środek"],
+                "lang_pl": "PL",
+                "lang_en": "EN"
+            },
+            "en": {
+                "window_title": "Maze Generator - PyQt6 (live)",
+                "checkbox_default": "Default",
+                "checkbox_instant": "Generate instantly",
+                "btn_generate": "Generate",
+                "btn_save": "Save PNG",
+                "btn_save_solution": "Save with solution",
+                "width_label": "Width (W):",
+                "height_label": "Height (H):",
+                "seed_label": "Seed:",
+                "seed_placeholder": "optional (number)",
+                "variant_label": "Entrance/Exit:",
+                "scale_label": "Scale (px per cell):",
+                "msg_generation_failed": "Generation failed.",
+                "msg_pillow_missing": "Pillow (PIL) is not available — cannot save PNG.",
+                "msg_animation_error_title": "Animation error",
+                "msg_init_error_title": "Initialization error",
+                "file_save_png": "Save PNG",
+                "file_save_solution": "Save with solution",
+                "variants": ["top–bottom", "corners", "opposite corners", "left–right", "bottom→center"],
+                "lang_pl": "PL",
+                "lang_en": "EN"
+            }
+        }
+
+        self.setWindowTitle(self.translations[self.locale]["window_title"])
+        self.setMinimumSize(900, 600)
+
+        self.default_W = 41
+        self.default_H = 41
+
+        form = QFormLayout()
+
+        self.w_input = QSpinBox()
+        self.w_input.setRange(5, 301)
+        self.w_input.setValue(self.default_W)
+        self.w_input.setSingleStep(2)
+
+        self.h_input = QSpinBox()
+        self.h_input.setRange(5, 301)
+        self.h_input.setValue(self.default_H)
+        self.h_input.setSingleStep(2)
+
+        self.seed_input = QLineEdit()
+        self.seed_input.setPlaceholderText(self.translations[self.locale]["seed_placeholder"])
+
+        self.variant_combo = QComboBox()
+        self.variant_combo.addItems(self.translations[self.locale]["variants"])
+        self.variant_combo.setCurrentIndex(0)
+
+        self.scale_default_checkbox = QCheckBox(self.translations[self.locale]["checkbox_default"])
+        self.scale_default_checkbox.setChecked(True)
+        self.scale_input = QSpinBox()
+        self.scale_input.setRange(1, 200)
+        self.scale_input.setValue(self.compute_default_scale(self.default_W))
+        self.scale_input.setEnabled(False)
+
+        self.scale_default_checkbox.stateChanged.connect(self.on_scale_mode_changed)
+
+        self.instant_checkbox = QCheckBox(self.translations[self.locale]["checkbox_instant"])
+
+        self.generate_btn = QPushButton(self.translations[self.locale]["btn_generate"])
+        self.save_btn = QPushButton(self.translations[self.locale]["btn_save"])
+        self.save_solution_btn = QPushButton(self.translations[self.locale]["btn_save_solution"])
+        self.save_btn.setEnabled(False)
+        self.save_solution_btn.setEnabled(False)
+
+        self.generate_btn.clicked.connect(self.on_generate)
+        self.save_btn.clicked.connect(self.on_save)
+        self.save_solution_btn.clicked.connect(self.on_save_solution_dialog)
+
+        form.addRow(self.translations[self.locale]["width_label"], self.w_input)
+        form.addRow(self.translations[self.locale]["height_label"], self.h_input)
+        form.addRow(self.translations[self.locale]["seed_label"], self.seed_input)
+        form.addRow(self.translations[self.locale]["variant_label"], self.variant_combo)
+
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(self.scale_default_checkbox)
+        scale_row.addWidget(self.scale_input)
+        form.addRow(self.translations[self.locale]["scale_label"], scale_row)
+        form.addRow(self.instant_checkbox)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.generate_btn)
+        btn_row.addWidget(self.save_btn)
+        btn_row.addWidget(self.save_solution_btn)
+
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setStyleSheet("background: #f7f7f7; border: 1px solid #bbb;")
+        self.preview_pixmap = None
+        self.preview_dirty = False
+
+        left = QVBoxLayout()
+        left.addLayout(form)
+        left.addLayout(btn_row)
+        left.addStretch()
+
+        main = QHBoxLayout()
+        main.addLayout(left, 0)
+        main.addWidget(self.preview_label, 1)
+
+        # footer with language toggle on the right
+        footer = QHBoxLayout()
+        footer.addStretch()
+
+        lang_box = QHBoxLayout()
+        self.pl_btn = QPushButton(self.translations["pl"]["lang_pl"])
+        self.en_btn = QPushButton(self.translations["en"]["lang_en"])
+        for b in (self.pl_btn, self.en_btn):
+            b.setCheckable(True)
+            b.setFixedSize(36, 24)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet("QPushButton { border-radius: 6px; padding: 2px 6px; }")
+        self.pl_btn.clicked.connect(lambda: self.set_locale('pl'))
+        self.en_btn.clicked.connect(lambda: self.set_locale('en'))
+        lang_box.addWidget(self.pl_btn)
+        lang_box.addWidget(self.en_btn)
+
+        footer.addLayout(lang_box)
+
+        outer = QVBoxLayout()
+        outer.addLayout(main)
+        outer.addLayout(footer)
+
+        self.setLayout(outer)
+        self.resize(1200, 700)
+
+        # modern flat style
+        self.setStyleSheet("""
+            QWidget {
+                background: qlineargradient(x1:0 y1:0, x2:0 y2:1, stop:0 #fafafa, stop:1 #f0f0f0);
+                font-family: "Segoe UI", Roboto, Arial;
+                font-size: 12px;
+            }
+            QLabel { color: #222; }
+            QLineEdit, QSpinBox, QComboBox {
+                background: white;
+                border: 1px solid #d0d0d0;
+                border-radius: 6px;
+                padding: 4px;
+                min-height: 26px;
+            }
+            QComboBox::drop-down { border: none; }
+            QPushButton {
+                background: #ffffff;
+                border: 1px solid #cfcfcf;
+                padding: 6px 10px;
+                border-radius: 8px;
+                min-height: 28px;
+            }
+            QPushButton:pressed {
+                background: #e6e6e6;
+            }
+            QPushButton:disabled {
+                background: #eeeeee;
+                color: #999999;
+            }
+            QCheckBox { spacing: 6px; }
+        """)
+
+        # highlight current language button
+        self.update_lang_buttons()
+
+        self.timer = QTimer()
+        self.timer.setInterval(10)
+        self.timer.timeout.connect(self.animation_step)
+
+        self.gen_iter = None
+        self.current_maze = None
+        self.W = None
+        self.H = None
+        self.scale = None
+        self.start = None
+        self.end = None
+
+    def update_lang_buttons(self):
+        if self.locale == 'pl':
+            self.pl_btn.setChecked(True)
+            self.en_btn.setChecked(False)
+            self.pl_btn.setStyleSheet("QPushButton { background: #2b7cff; color: white; border-radius: 6px; }")
+            self.en_btn.setStyleSheet("QPushButton { background: transparent; color: #444; border-radius: 6px; }")
+        else:
+            self.pl_btn.setChecked(False)
+            self.en_btn.setChecked(True)
+            self.en_btn.setStyleSheet("QPushButton { background: #2b7cff; color: white; border-radius: 6px; }")
+            self.pl_btn.setStyleSheet("QPushButton { background: transparent; color: #444; border-radius: 6px; }")
+
+    def set_locale(self, locale):
+        if locale not in self.translations:
+            return
+        self.locale = locale
+        tr = self.translations[locale]
+        self.setWindowTitle(tr["window_title"])
+        # update labels and placeholders
+        # form rows: replace texts by rebuilding the form layout rows that we created earlier is tedious,
+        # so update widgets directly where possible
+        # update checkbox texts
+        self.scale_default_checkbox.setText(tr["checkbox_default"])
+        self.instant_checkbox.setText(tr["checkbox_instant"])
+        # buttons
+        self.generate_btn.setText(tr["btn_generate"])
+        self.save_btn.setText(tr["btn_save"])
+        self.save_solution_btn.setText(tr["btn_save_solution"])
+        # placeholders and labels: we need to update the form rows - easiest is to rebuild the left form texts:
+        # find parent form layout and replace labels
+        # We know the layout structure: left -> form (first item). We'll iterate children
+        try:
+            form_layout = None
+            left_layout = self.layout().itemAt(0).layout().itemAt(0).layout()
+            form_layout = left_layout
+        except Exception:
+            # fallback: we stored no refs; try to be resilient and update basic placeholders
+            form_layout = None
+        # update seed placeholder
+        self.seed_input.setPlaceholderText(tr["seed_placeholder"])
+        # update variant items
+        current_index = self.variant_combo.currentIndex()
+        self.variant_combo.clear()
+        self.variant_combo.addItems(tr["variants"])
+        self.variant_combo.setCurrentIndex(min(current_index, len(tr["variants"]) - 1))
+        # update form labels by searching for QLabel children in the left layout
+        # to keep it simple, update the labels we know by creating small QLabel refs where necessary:
+        # We'll traverse the left-side form layout and update any QLabel whose text matches earlier translations.
+        # Simpler approach: recreate the form rows visuals by replacing the first column texts.
+        # The original form rows order:
+        # 0: width_label
+        # 1: height_label
+        # 2: seed_label
+        # 3: variant_label
+        # 4: scale_label (with widgets)
+        # We'll attempt to update them via the layout's itemAt for QFormLayout if possible.
+        try:
+            # left_layout is actually the QFormLayout we created earlier in __init__
+            fl = left_layout  # it's QFormLayout
+            # QFormLayout API isn't exposed directly here, but we can replace by adding new labels using setWidget
+            # To avoid complex introspection, we'll add labels right before the inputs by using parent layouts:
+            # This is somewhat heuristic but works in typical PyQt layouts.
+            # As fallback, do nothing.
+            pass
+        except Exception:
+            pass
+
+        # Update the static text labels in the form using a simple approach:
+        # Remove / re-add the form layout on the left side to ensure labels update cleanly.
+        try:
+            # Rebuild left form area
+            # locate left layout (main.itemAt(0))
+            main_layout = self.layout().itemAt(0).layout()
+            # left is at index 0 in main_layout
+            left_layout = main_layout.itemAt(0).layout()
+            # remove existing left_layout contents and recreate form+buttons
+            # create new form
+            form = QFormLayout()
+            form.addRow(tr["width_label"], self.w_input)
+            form.addRow(tr["height_label"], self.h_input)
+            form.addRow(tr["seed_label"], self.seed_input)
+            form.addRow(tr["variant_label"], self.variant_combo)
+            scale_row = QHBoxLayout()
+            scale_row.addWidget(self.scale_default_checkbox)
+            scale_row.addWidget(self.scale_input)
+            form.addRow(tr["scale_label"], scale_row)
+            form.addRow(self.instant_checkbox)
+            # rebuild left container
+            # clear left_layout: remove all items
+            while left_layout.count():
+                item = left_layout.takeAt(0)
+                # do not delete widgets (we reuse them)
+            # now add new form and buttons
+            left_layout.addLayout(form)
+            btn_row = QHBoxLayout()
+            btn_row.addWidget(self.generate_btn)
+            btn_row.addWidget(self.save_btn)
+            btn_row.addWidget(self.save_solution_btn)
+            left_layout.addLayout(btn_row)
+            left_layout.addStretch()
+        except Exception:
+            # If anything fails, it's non-fatal — main texts updated elsewhere
+            pass
+
+        # update file dialog button labels are used at call time; update message texts in translation dict is enough
+        self.update_lang_buttons()
+
+    def event(self, ev):
+        if isinstance(ev, _CallEvent):
+            try:
+                ev.callable()
+            except Exception:
+                pass
+            return True
+        return super().event(ev)
+
+    def compute_default_scale(self, W):
+        scale = (2480 - 300) // max(1, int(W))
+        return max(1, scale)
+
+    def on_scale_mode_changed(self, state):
+        custom = not self.scale_default_checkbox.isChecked()
+        self.scale_input.setEnabled(custom)
+        if not custom:
+            W = self.w_input.value()
+            self.scale_input.setValue(self.compute_default_scale(W))
+
+    def pick_entrance_and_exit(self, W, H, variant):
+        # variant is a string in current language; map it to semantic variants by index
+        # find index in current translations
+        variants = self.translations[self.locale]["variants"]
+        try:
+            idx = variants.index(variant)
+        except Exception:
+            # if not found (older value), use current combo index
+            idx = self.variant_combo.currentIndex()
+        if idx == 0:  # top-bottom / góra–dół
+            sx = random.choice([i for i in range(1, W, 2)])
+            ex = random.choice([i for i in range(1, W, 2)])
+            return (sx, 0), (ex, H-1)
+        if idx == 1:  # corners / rogi
+            return (1,0), (W-2,H-1)
+        if idx == 2:  # opposite corners / przeciwne rogi
+            return (W-2,0), (1,H-1)
+        if idx == 3:  # left-right / lewo–prawo
+            sy = random.choice([i for i in range(1, H, 2)])
+            ey = random.choice([i for i in range(1, H, 2)])
+            return (0, sy), (W-1, ey)
+        if idx == 4:  # bottom->center / dół→środek
+            sx = random.choice([i for i in range(1, W, 2)])
+            return (sx, H-1), (W//2, H//2)
+        return (1,0), (W-2,H-1)
+
+    def prepare_canvas(self, W, H, scale):
+        if W*scale <= 0 or H*scale <= 0:
+            return
+        pixmap = QPixmap(W*scale, H*scale)
+        pixmap.fill(QColor("white"))
+        self.preview_pixmap = pixmap
+        self.preview_dirty = True
+        self.update_preview_display()
+
+    def draw_maze_to_pixmap(self, maze, scale, highlight=None):
+        W = len(maze[0])
+        H = len(maze)
+        required_size = QSize(W*scale, H*scale)
+        if self.preview_pixmap is None or self.preview_pixmap.size() != required_size:
+            self.preview_pixmap = QPixmap(required_size)
+        img = self.preview_pixmap
+        painter = QPainter(img)
+        painter.fillRect(0,0, img.width(), img.height(), QColor("white"))
+        for y in range(H):
+            for x in range(W):
+                if maze[y][x] == '#':
+                    painter.fillRect(x*scale, y*scale, scale, scale, QColor("black"))
+        if highlight:
+            painter.setPen(Qt.PenStyle.NoPen)
+            for (x,y) in highlight:
+                painter.fillRect(x*scale, y*scale, scale, scale, QColor("red"))
+        painter.end()
+        self.preview_dirty = True
+        self.update_preview_display()
+
+    def update_preview_display(self):
+        if self.preview_pixmap is None:
+            return
+        target_size = self.preview_label.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self.preview_pixmap.scaled(
+            target_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.preview_label.setPixmap(scaled)
+        self.preview_dirty = False
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_preview_display()
+
+    def on_generate(self):
+        W = make_odd(self.w_input.value())
+        H = make_odd(self.h_input.value())
+        seed_text = self.seed_input.text().strip()
+        seed = int(seed_text) if seed_text.isdigit() else None
+        variant_text = self.variant_combo.currentText()
+        scale = self.compute_default_scale(W) if self.scale_default_checkbox.isChecked() else int(self.scale_input.value())
+        self.start, self.end = self.pick_entrance_and_exit(W,H,variant_text)
+
+        self.W, self.H, self.scale = W, H, scale
+        self.prepare_canvas(W,H,scale)
+        self.current_maze = [['#' for _ in range(W)] for _ in range(H)]
+
+        self.generate_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        self.save_solution_btn.setEnabled(False)
+        self.w_input.setEnabled(False)
+        self.h_input.setEnabled(False)
+        self.seed_input.setEnabled(False)
+        self.variant_combo.setEnabled(False)
+        self.scale_default_checkbox.setEnabled(False)
+        self.scale_input.setEnabled(False)
+
+        if self.instant_checkbox.isChecked():
+            final = None
+            for step in dfs_generator(W,H,seed):
+                if step[0] == 'done':
+                    final = step[1]
+            if final is None:
+                QMessageBox.warning(self, self.translations[self.locale]["msg_animation_error_title"], self.translations[self.locale]["msg_generation_failed"])
+                self.unlock_ui()
+                return
+            self.current_maze = [row[:] for row in final]
+            self.ensure_entrances()
+            self.draw_maze_to_pixmap(self.current_maze, self.scale)
+            self.unlock_ui()
+            return
+
+        self.gen_iter = dfs_generator(W,H,seed)
+        base_area = 32 * 32
+        area = max(1, W * H)
+        speed_factor = area / base_area
+        base_ms = 12
+        interval_ms = max(1, int(base_ms / speed_factor))
+        self.timer.setInterval(interval_ms)
+        self.timer.start()
+
+    def ensure_entrances(self):
+        sx,sy = self.start
+        ex,ey = self.end
+        if sy == 0:
+            self.current_maze[0][sx] = ' '
+            if 1 < self.H:
+                self.current_maze[1][sx] = ' '
+        if sy == self.H-1:
+            self.current_maze[self.H-1][sx] = ' '
+            if self.H-2 >= 0:
+                self.current_maze[self.H-2][sx] = ' '
+        if sx == 0:
+            self.current_maze[sy][0] = ' '
+            if 1 < self.W:
+                self.current_maze[sy][1] = ' '
+        if sx == self.W-1:
+            self.current_maze[sy][self.W-1] = ' '
+            if self.W-2 >= 0:
+                self.current_maze[sy][self.W-2] = ' '
+        if ey == 0:
+            self.current_maze[0][ex] = ' '
+            if 1 < self.H:
+                self.current_maze[1][ex] = ' '
+        if ey == self.H-1:
+            self.current_maze[self.H-1][ex] = ' '
+            if self.H-2 >= 0:
+                self.current_maze[self.H-2][ex] = ' '
+        if ex == 0:
+            self.current_maze[ey][0] = ' '
+            if 1 < self.W:
+                self.current_maze[ey][1] = ' '
+        if ex == self.W-1:
+            self.current_maze[ey][self.W-1] = ' '
+            if self.W-2 >= 0:
+                self.current_maze[ey][self.W-2] = ' '
+
+    def animation_step(self):
+        if not self.gen_iter:
+            self.timer.stop()
+            self.unlock_ui()
+            return
+        try:
+            step = next(self.gen_iter)
+            if step[0] == 'carve':
+                _, x, y, maze_snapshot = step
+                self.current_maze = [row[:] for row in maze_snapshot]
+                self.draw_maze_to_pixmap(self.current_maze, self.scale)
+            elif step[0] == 'done':
+                _, maze_snapshot = step
+                self.current_maze = [row[:] for row in maze_snapshot]
+                self.ensure_entrances()
+                self.draw_maze_to_pixmap(self.current_maze, self.scale)
+                self.timer.stop()
+                self.unlock_ui()
+        except StopIteration:
+            self.timer.stop()
+            self.unlock_ui()
+        except Exception as e:
+            self.timer.stop()
+            QMessageBox.warning(self, self.translations[self.locale]["msg_animation_error_title"], str(e))
+            self.unlock_ui()
+
+    def unlock_ui(self):
+        self.generate_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+        self.save_solution_btn.setEnabled(True)
+        self.w_input.setEnabled(True)
+        self.h_input.setEnabled(True)
+        self.seed_input.setEnabled(True)
+        self.variant_combo.setEnabled(True)
+        self.scale_default_checkbox.setEnabled(True)
+        self.on_scale_mode_changed(0)
+
+    def on_save(self):
+        tr = self.translations[self.locale]
+        filename, _ = QFileDialog.getSaveFileName(self, tr["file_save_png"], "", "PNG Files (*.png)")
+        if not filename:
+            return
+        self.save_maze_png(filename, self.current_maze, self.scale)
+
+    def on_save_solution_dialog(self):
+        tr = self.translations[self.locale]
+        filename, _ = QFileDialog.getSaveFileName(self, tr["file_save_solution"], "", "PNG Files (*.png)")
+        if not filename:
+            return
+        path = filename.replace("\\", "/")
+        path = path if path.endswith(".png") else path + ".png"
+        path = os.path.abspath(path)
+        path_dir = os.path.dirname(path)
+        if not os.path.exists(path_dir):
+            os.makedirs(path_dir)
+        self.save_maze_solution_png(path)
+
+    def save_maze_png(self, filename, maze, scale):
+        H = len(maze)
+        W = len(maze[0])
+        if Image is None or ImageDraw is None:
+            QMessageBox.warning(self, self.translations[self.locale]["msg_animation_error_title"], self.translations[self.locale]["msg_pillow_missing"])
+            return
+        img = Image.new("RGB", (W*scale, H*scale), "white")
+        draw = ImageDraw.Draw(img)
+        for y in range(H):
+            for x in range(W):
+                if maze[y][x] == '#':
+                    draw.rectangle([x*scale, y*scale, x*scale+scale-1, y*scale+scale-1], fill="black")
+        img.save(filename)
+
+    def save_maze_solution_png(self, filename):
+        maze = [row[:] for row in self.current_maze]
+        sx, sy = self.start
+        ex, ey = self.end
+        start_bfs = (sx, 1) if sy == 0 else (sx, self.H-2) if sy == self.H-1 else (1, sy) if sx == 0 else (self.W-2, sy) if sx == self.W-1 else (sx, sy)
+        end_bfs = (ex, 1) if ey == 0 else (ex, self.H-2) if ey == self.H-1 else (1, ey) if ex == 0 else (self.W-2, ey) if ex == self.W-1 else (ex, ey)
+        path_cells = bfs_solve(maze, start_bfs, end_bfs)
+        scale = self.scale
+        H = len(maze)
+        W = len(maze[0])
+        if Image is None or ImageDraw is None:
+            QMessageBox.warning(self, self.translations[self.locale]["msg_animation_error_title"], self.translations[self.locale]["msg_pillow_missing"])
+            return
+        img = Image.new("RGB", (W*scale, H*scale), "white")
+        draw = ImageDraw.Draw(img)
+        for y in range(H):
+            for x in range(W):
+                if maze[y][x] == '#':
+                    draw.rectangle([x*scale, y*scale, x*scale+scale-1, y*scale+scale-1], fill="black")
+        for x,y in path_cells:
+            draw.rectangle([x*scale, y*scale, x*scale+scale-1, y*scale+scale-1], fill="red")
+        img.save(filename)
+
+try:
+    win = MazeWindow()
+    win.show()
+except Exception as e:
+    try:
+        with open("live_init_error.log", "w", encoding="utf-8") as f:
+            f.write(str(e))
+    except Exception:
+        pass
+    try:
+        QMessageBox.critical(None, "Błąd inicjalizacji", str(e))
+    except Exception:
+        print("Błąd inicjalizacji:", e)
